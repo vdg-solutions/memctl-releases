@@ -9,13 +9,13 @@ Source code is private. Released binaries live here.
 ### One-line install (Linux / macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vdg-solutions/memctl-releases/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vdg-solutions/memctl-releases/master/install.sh | sh
 ```
 
 ### One-line install (Windows PowerShell)
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/vdg-solutions/memctl-releases/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/vdg-solutions/memctl-releases/master/install.ps1 | iex
 ```
 
 ### Manual download
