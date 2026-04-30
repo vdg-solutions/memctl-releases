@@ -1,5 +1,5 @@
 # memctl installer — Windows PowerShell
-# Usage: iwr -useb https://raw.githubusercontent.com/vdg-solutions/memctl-releases/main/install.ps1 | iex
+# Usage: iwr -useb https://raw.githubusercontent.com/vdg-solutions/memctl-releases/master/install.ps1 | iex
 
 $ErrorActionPreference = 'Stop'
 $Repo = 'vdg-solutions/memctl-releases'
