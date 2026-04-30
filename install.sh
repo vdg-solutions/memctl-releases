@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # memctl installer — Linux / macOS
-# Usage: curl -fsSL https://raw.githubusercontent.com/vdg-solutions/memctl-releases/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/vdg-solutions/memctl-releases/master/install.sh | sh
 set -euo pipefail
 
 REPO="vdg-solutions/memctl-releases"
