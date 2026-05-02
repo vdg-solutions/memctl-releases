@@ -141,7 +141,7 @@ Notes are markdown files on disk — you never lose them unless filesystem fails
 
 ## Memory Protocol — What you actually do
 
-> Full protocol: `backlog/wiki/memory-protocol.md` (canonical, ~1700 lines, 22 sections — everything below is summary).
+> Full canonical protocol (architecture, wire DTOs, hook contract, integration points) lives in the source repo and ships internally. This skill is the bot-facing summary — sufficient for using memctl in Claude Code without further docs.
 
 ### Mental model
 
@@ -170,7 +170,7 @@ Notes are markdown files on disk — you never lose them unless filesystem fails
 # Auto: Stop hook captures conversation → chats/{date}.md (you do nothing)
 # Auto: UserPromptSubmit hook injects ## Memory Context (you read it)
 
-# Manual, by SDLC role:
+# Manual, by SDLC role (see § Commands "add" for full syntax):
 memctl add "<text>" --tags "session,task-{id}"           # session state
 memctl add "<text>" --tags "qc-feedback,task-{id}"        # retry feedback
 memctl add "<text>" --tags "qc-error,project-{name}"      # mid-term error pattern
@@ -178,8 +178,8 @@ memctl add "<text>" --tags "golden-rule"                  # cross-project univer
 memctl add "<text>" --tags "insight"                      # meta-learning
 memctl add "<text>" --tags "dream-log"                    # consolidation entry
 
-# Boost importance:
-memctl boost <id> --weight 1.5
+# Boost importance (decay-resistant):
+memctl weight <id> 1.5
 ```
 
 ### Recall (reads — Tier 3 active recall when injected context insufficient)
@@ -194,18 +194,33 @@ memctl list --limit 10                        # top by weight
 **Smart retrieval (5 default signals on every search):**
 1. Cluster routing (vault ≥500 notes only) → 2. BM25+semantic hybrid → 3. PRF rerank (drift-guarded) → 4. PageRank boost (recency-clamped) → 5. Wikilink anchor expansion (sparse-graph guarded)
 
-Realistic gain: ~5-10% (vault <100), ~25-35% (vault 500-2000). NOT 50-60%. See protocol §6.
+Realistic gain: ~5-10% (vault <100), ~25-35% (vault 500-2000). NOT 50-60%.
 
-### Maintenance (single command, self-decides scope)
+### Maintenance (single `maintain` command, self-decides scope)
 
 ```bash
-memctl maintain               # checks pressure.json, runs only what's needed
-# → may run: ingest re-index, lint, decay, dedupe, dream cycle
-# → throttle 60s — no thrash
-# → emits {"actions": [...], "skipped_reason": "..."} so caller knows
+memctl maintain               # auto-detects what's needed: ingest if vault changed + decay if stale
+memctl maintain --dry-run     # plan without executing
+memctl maintain --force       # bypass 60s throttle
 ```
 
-Auto-fires on every memctl invocation (passive). Manual force: `memctl maintain --force`.
+What it does (in order):
+1. Throttle check — skip if last run < 60s ago (unless `--force`)
+2. **Ingest** if any vault file modified after index — re-indexes (structural lint baked-in)
+3. **Decay** if `last_decay_date != today` — reduces weight of notes >30 days stale
+4. Stamp `last_maintain_run` timestamp in index metadata
+
+Output:
+```json
+{"actions": ["ingest", "decay"], "skipped": ["..."], "skipped_reason": null, "throttled": false, "dry_run": null}
+```
+
+Semantic lint (LLM-driven contradiction/synthesis check) NOT auto-triggered — invoke manually when bot wants deep audit:
+
+```bash
+memctl lint --semantic --self                              # bot reasons in chat
+memctl lint --semantic --llm-url <url> --llm-model <model> # external LLM
+```
 
 ### Tag schema (routing key)
 
@@ -225,7 +240,7 @@ Auto-fires on every memctl invocation (passive). Manual force: `memctl maintain 
 
 ---
 
-## Vault layout (V2.1 as of v1.3.0)
+## Vault layout (V2.1 — since v1.3.0)
 
 `memctl init --vault <project-anchor>` creates `<project-anchor>/.memctl/` as the vault root container:
 
@@ -574,13 +589,13 @@ The `initialize` response automatically includes a session protocol in `serverIn
 
 ## Other LLM Clients
 
-memctl's MCP mode and CLI are client-agnostic. G1/G2 automation examples use Claude Code hooks, but the underlying commands work with any client.
+memctl's MCP mode and CLI are client-agnostic. Auto-capture (`memctl capture`) and proactive injection (`memctl context-inject`) are shipped commands that work with any client implementing the Hook Protocol v1 below — Claude Code is just the reference implementation.
 
 ### AGENTS.md / OpenCode / Codex / Pi
-Copy `docs/memctl.md` to `AGENTS.md` in your project root. The session protocol (Recall → Encode → Consolidate) applies to any LLM agent with MCP support.
+Copy this skill content (the file you're reading) to `AGENTS.md` in your project root. The session protocol applies to any LLM agent with MCP support.
 
 ### Shell wrapper (any CLI-based LLM)
-For clients with no hook system, a thin shell wrapper provides G1+G2 automation:
+For clients with no hook system, a thin shell wrapper provides auto-capture + proactive injection:
 ```bash
 #!/usr/bin/env bash
 # Usage: memctl-wrap <llm-cli-command> [args...]
@@ -674,9 +689,11 @@ Claude Code maps: `Stop` → `after-response`, `UserPromptSubmit` → `before-pr
 
 ## JSON Output
 
-Every command returns:
+All commands emit JSON to stdout. Frozen envelope (wire contract):
+
 ```json
 {
+  "schema_version": 1,
   "success": true,
   "action": "search",
   "message": "5 results",
@@ -695,9 +712,14 @@ Every command returns:
         "score": 0.91
       }
     ]
-  }
+  },
+  "error": null
 }
 ```
+
+On error: `success: false`, `data: null`, `error: { "code": "<string>", "message": "<human readable>" }`.
+
+**Versioning policy:** `schema_version` integer (currently `1`). Adding fields → no bump (clients ignore unknown). Renaming/removing fields → bump `schema_version` (breaking change requires major version).
 
 ---
 
@@ -811,65 +833,48 @@ memctl search-semantic "<query>" --vault ./vault --scope <tag-result-ids>
 
 ---
 
-## Roadmap — Từ "có thể nhớ" → "nhớ như con người"
+## Capabilities (current state, v1.3.x)
 
-Bộ nhớ con người không cần effort: ký ức hình thành tự động, được recall khi liên quan, phai mờ theo thời gian nếu không dùng đến. memctl hiện tại yêu cầu bot chủ động — gọi `list`, gọi `search`, gọi `add`. Roadmap này loại bỏ từng friction point đó.
+memctl ships these capabilities today. Bot doesn't need to plan around future features — call commands directly.
 
-> "Cần nhớ" = decisions, findings, patterns, user preferences, bug rationale. Không phải mọi exchange — auto-capture filter signal khỏi noise. G5 (decay) là quá trình quên tự nhiên: những gì không được dùng đến sẽ chìm xuống.
+### Auto-capture (`memctl capture`)
+Reads Claude Code `Stop` hook payload from stdin (JSON), filters signal (drops turns <50 chars, pure tool-call turns), appends to `chats/<date>.md`. Non-Claude clients use direct mode: `memctl capture --role user --text "..."`.
 
-### G1 — Auto-capture: ký ức hình thành tự động (P0)
+### Proactive injection (`memctl context-inject`)
+Reads user prompt from stdin, extracts keywords, runs hybrid search + top-by-weight, formats as `## Memory Context` markdown → stdout. Wired into Claude Code `UserPromptSubmit` hook by default.
 
-**Vấn đề:** Bot phải chủ động gọi `create`/`append` để lưu memory. Nó thường quên.
+### Two-tier lint (`memctl lint`)
+- **Structural (free):** orphans, duplicates, broken links, isolated notes. Baked into `ingest` — every re-index runs structural lint.
+- **Semantic (LLM-driven):** contradictions, stale claims, synthesis candidates.
+  - Self-reasoning mode: `memctl lint --semantic --self` dumps notes as structured prompt → bot reasons in chat → bot saves report
+  - External LLM mode: `memctl lint --semantic --llm-url <url> --llm-model <model> --llm-key <key>` (OpenAI-compat)
 
-**Giải pháp:** New command `memctl capture`. Đọc Claude Code `Stop` hook payload từ stdin (JSON), filter signal (bỏ turns < 50 chars, bỏ pure tool-call turns), lưu vào `sessions/<date>-<session_id>.md`. Non-Claude Code clients dùng direct mode: `memctl capture --role user --text "..."`.
-
-```json
-// ~/.claude/settings.json (Claude Code)
-{ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "memctl capture" }] }] } }
-// Other clients: shell wrapper → memctl capture --role <user|assistant> --text "<content>"
-```
-
-### G2 — Proactive injection: ký ức tự được recall khi liên quan (P0)
-
-**Vấn đề:** Bot phải chủ động gọi `list`/`search` để load context — nó có thể skip.
-
-**Giải pháp:** New command `memctl context-inject`. Đọc user prompt từ stdin, extract keywords, chạy `list + search`, format thành context block → stdout. Kết hợp với `UserPromptSubmit` hook — context được inject tự động vào mỗi conversation turn trước khi bot process.
-
-```json
-{ "hooks": { "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "memctl context-inject" }] }] } }
-```
-
-### G3 — Lint hai tầng: vệ sinh ký ức tự động (P1)
-
-**Tier 1 — Structural (free, baked vào ingest):** Mỗi lần `ingest` tự động health check — orphans, duplicates, broken links, isolated notes. Kết quả append vào ingest JSON output. Không cần LLM.
-
-**Tier 2 — Semantic (cheap LLM, auto-scheduled):** Track `last_semantic_lint` trong index metadata. Khi `now - last_semantic_lint > 7 ngày` (configurable), ingest tự trigger semantic lint qua LLM rẻ (~$0.05/100 notes). LLM tìm contradictions, stale claims, synthesis candidates. Report lưu thành vault note → bot đọc lần sau. Ingest output báo rõ khi overdue để bot biết gọi thủ công nếu cần.
+### Source fetch (`memctl fetch`)
+Fetch URL or file, convert HTML→markdown, output to stdout. Bot synthesizes + calls `add`/`append` for vault notes.
 
 ```bash
-memctl ingest   # structural free + semantic auto khi overdue
-
-# Manual — bot tự xử lý (không cần external LLM):
-memctl lint --semantic --self   # dump notes as prompt → bot reasons → bot saves report
-
-# Manual — via VDG proxy (scheduled/background):
-memctl lint --semantic \
-  --llm-url http://127.0.0.1:1234/v1 \
-  --llm-model gemma4:31b-cloud \
-  --llm-key $PROXY_KEY
+memctl fetch "https://example.com/article"     # → markdown to stdout
 ```
 
-### G4 — Source fetch: học từ nguồn bên ngoài (P2)
-
-**Vấn đề:** Không có cách fetch raw source (URL/file) để bot synthesize vào vault.
-
-**Giải pháp:** `memctl fetch <url>` — fetch URL, convert HTML → markdown, output to stdout. Bot đọc, synthesize, gọi `create`/`append`. memctl là fetch helper; bot là brain.
+### Temporal decay (`memctl decay`)
+Reduce weight of stale notes not accessed/updated in N days.
 
 ```bash
-memctl fetch "https://example.com/article" | # → bot reads, creates notes
+memctl decay --days 30
 ```
 
-### G5 — Temporal decay: quên tự nhiên (P1)
+Notes manually boosted via `memctl weight <id> 1.5` (or higher) are decay-resistant. Decay surfaces fresh content over old.
 
-**Vấn đề:** Old notes không decay → cạnh tranh với fresh notes trong search results. Vault trở nên noisy theo thời gian.
+### Identity note (`memctl identity`)
+Designate one note as Layer 0 vault identity. Auto-injected into every MCP `initialize` response via `serverInfo.instructions`.
 
-**Giải pháp:** `memctl decay --days 30` — giảm weight của notes không được access/update trong N ngày. Weight field đã có sẵn; chỉ cần decay logic. Notes quan trọng được boost tay (hoặc qua auto-capture) → immune to decay. Notes bị quên → tự nhiên chìm xuống. Đây là cơ chế giữ vault focused vào "cần nhớ" thay vì "mọi thứ".
+```bash
+memctl identity set <id>      # designate
+memctl identity get           # retrieve current
+```
+
+### Hook diagnostics (`memctl hook-status`)
+Show recent capture + context-inject activity for debugging.
+
+### Tag migration (`memctl migrate-tags`)
+One-time legacy tag rewrite helper. Use only when tag schema changes.
