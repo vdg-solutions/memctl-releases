@@ -14,64 +14,214 @@ You have persistent memory. It survives across sessions, across projects, across
 
 ---
 
-## Memory Protocol — What to do every session
+## Prerequisites — install memctl binary FIRST
 
-### Session start (Recall)
-```bash
-memctl status                           # vault healthy? model ready?
-memctl ingest                           # re-index if new files added outside Claude
-memctl list --limit 10                  # load top memories by importance
-memctl search "<current task keywords>" # surface relevant prior decisions
+The Claude Code plugin ships hooks + skill, but **NOT** the binary. Bot must verify binary present before any memctl command.
+
+```
+Bot first action this session: check binary
+  ├── `memctl --version`
+  │     ├── prints version (e.g. "1.3.1") → proceed to First-run setup
+  │     ├── version mismatch with plugin (plugin v1.3.1 vs binary v1.2.x) → tell user: upgrade binary
+  │     └── command-not-found → binary missing, tell user to install:
+  │           Linux/macOS:
+  │             curl -fsSL https://raw.githubusercontent.com/vdg-solutions/memctl-releases/master/install.sh | sh
+  │           Windows PowerShell:
+  │             iwr -useb https://raw.githubusercontent.com/vdg-solutions/memctl-releases/master/install.ps1 | iex
+  │           Or via dotnet:
+  │             dotnet tool install -g memctl
+  │           After install: restart shell so PATH update takes effect.
 ```
 
-### During session (Encode)
-```bash
-# After a decision, finding, or discovered pattern:
-memctl add --title "Decision: use X over Y" --content "Rationale: ..."
-memctl append --id <note-id> --content "Update: discovered edge case..."
+Until binary present, all hook commands fail silently (they have `|| true` guards). Bot sees no `## Memory Context` injection, sees nothing wrong, but memory is offline. ALWAYS check `memctl --version` once per session before assuming memory works.
 
-# Boost notes that will matter next session:
-memctl weight <id> 1.5
+---
 
-# File useful answers back — they compound future context:
-memctl add --title "Analysis: <topic>" --content "<synthesized answer>"
+## First-run setup (bot decision tree)
+
+After binary verified, run this decision tree once per session:
+
+```
+1. memctl status                                      # check vault state
+   ├── success + vault_found=true  → vault exists, proceed normally
+   ├── success + vault_found=false → no vault here yet, decide next step
+   └── command not found            → re-check Prerequisites above
+
+2. IF no vault yet, ask user (only once per project):
+   "No memctl vault here. Init `<cwd>/.memctl/` for this project? [Y/n]"
+   ├── Y → memctl init --vault .                      # creates ./.memctl/ + adds .gitignore
+   ├── shared global vault → tell user: 'export MEMCTL_SHARED_VAULT=<path>'  (v1.3.1+)
+   └── skip → continue without memory; do NOT prompt again this session
+
+3. memctl model download                              # only if status reports model_ready=false (one-time, ~310 MB)
+
+4. memctl ingest                                      # only if vault exists but vault_indexed=false
 ```
 
-### Session end (Consolidate)
+Hooks (SessionStart/UserPromptSubmit/Stop) fail silently when vault missing — they exit 0 and inject nothing. Bot is the one that detects and offers init.
+
+After init completes, every subsequent prompt receives `## Memory Context` injection automatically. Bot reads that block as part of normal context, no explicit recall needed.
+
+### Optional shared vault (v1.3.1+)
+
+For cross-project personal notes (life decisions, code patterns) without per-project vaults everywhere:
+
 ```bash
-memctl add --title "Session: <date> — <task>" --content "<summary of what was done, decided, left open>"
+# Init once
+memctl init --vault $HOME/memctl-personal
+
+# Set env var so cwd without `.memctl/` falls through to it
+export MEMCTL_SHARED_VAULT=$HOME/memctl-personal/.memctl     # Linux/macOS
+$env:MEMCTL_SHARED_VAULT="$HOME\memctl-personal\.memctl"   # PowerShell
 ```
 
-### Periodic maintenance (Lint) — fully automatic after G3 ships
+Per-project `.memctl/` always wins over env var. Sensitive vaults never leak.
+
+---
+
+## Disable / uninstall
+
+Disable individual hook (graceful degrade — hook exits 0 silent):
+
 ```bash
-# Structural lint: baked into ingest — runs every session, free
-memctl ingest
-# → {"indexed": 47, "lint": {"orphans": 2, "broken_links": 1, "duplicates": 0}}
-
-# Semantic lint: auto-triggered by ingest when overdue (default: every 7 days)
-# Uses cheap LLM (~$0.05/run for 100 notes) — no manual action needed
-# Report saved as vault note → bot reads it next session start
-# ingest output includes hint when overdue:
-# → {"semantic_lint": {"days_since": 9, "overdue": true, "hint": "Run: memctl lint --semantic ..."}}
-
-# Manual semantic lint — bot does it itself (no external LLM):
-memctl lint --semantic --self
-# → outputs all notes as structured prompt to stdout
-# → bot reads, reasons, calls `memctl create` to save lint report
-
-# Manual semantic lint — via VDG proxy:
-memctl lint --semantic \
-  --llm-url http://127.0.0.1:1234/v1 \
-  --llm-model gemma4:31b-cloud \
-  --llm-key $PROXY_KEY
-
-# Coming G5:
-memctl decay --days 30      # reduce weight of notes not touched in N days
+export MEMCTL_DISABLE_AUTOCAPTURE=1     # Stop hook off (no chat capture)
+export MEMCTL_DISABLE_AUTOINJECT=1      # UserPromptSubmit hook off (no context inject)
+# SessionStart has no flag — it's idempotent status check
 ```
 
-Until G3 ships, manually ask the bot: *"Review my vault and clean up duplicates/orphans."*
+One-off no-trace session: set both env vars before launching `claude`.
 
-> **Coming in roadmap G1+G2:** This full protocol will run automatically via Claude Code hooks — capture without remembering to capture, recall without remembering to recall.
+Uninstall plugin entirely:
+
+```bash
+claude plugin uninstall memctl@vdg-solutions
+```
+
+Uninstall binary:
+
+```bash
+# If installed via curl/iwr
+rm ~/.local/bin/memctl                                    # Linux/macOS
+Remove-Item "$env:LOCALAPPDATA\Programs\memctl" -Recurse  # Windows
+
+# If installed via dotnet tool
+dotnet tool uninstall -g memctl
+```
+
+Vault data persists at `<project>/.memctl/` after uninstall — delete manually if not wanted.
+
+---
+
+## Recovery — broken vault / model / version mismatch
+
+```bash
+# Model corrupted (download interrupted, file truncated):
+memctl model download --force                            # re-fetch (~310 MB)
+
+# Vault index corrupted (SQLite corruption, ABI break post-upgrade):
+rm <vault>/.obsidian/memctl/index.db                     # delete index, NOT notes
+memctl ingest --vault <vault>                            # rebuild
+
+# Notes partially deleted but vault dir survives:
+memctl ingest --vault <vault>                            # re-scan + re-index existing .md files
+
+# Plugin v1.3.x + binary v1.2.x mismatch (skill expects new commands binary lacks):
+# Upgrade binary to match plugin version (re-run installer one-liner)
+
+# Vault gone entirely (catastrophic):
+# Restore from git/backup if vault tracked, else memctl init fresh + accept memory loss
+
+# Verify recovery:
+memctl status     # all green: model_ready=true, vault_indexed=true, note_count > 0
+```
+
+Notes are markdown files on disk — you never lose them unless filesystem fails. Index is rebuildable from notes.
+
+---
+
+## Memory Protocol — What you actually do
+
+> Full protocol: `backlog/wiki/memory-protocol.md` (canonical, ~1700 lines, 22 sections — everything below is summary).
+
+### Mental model
+
+**You don't manually capture or recall.** Hooks do that. You consume context auto-injected into every prompt + invoke `memctl search` via Bash when surface coverage insufficient. Maintenance auto-triggered on every memctl invocation (pressure-checked, throttled 60s).
+
+### 4 sub-systems (memory types)
+
+| Type | Stores | Subdir | Lifecycle |
+|------|--------|--------|-----------|
+| **Episodic** | Chat turns, session logs | `chats/` (daily YYYY-MM-DD.md) | Stop hook auto-write; archive after 1 year |
+| **Semantic** | Facts, decisions, patterns, lessons | `lessons/`, `decisions/`, `patterns/` | /design + /retro + /qc-dream write |
+| **Procedural** | Active rules (golden, qc-rule, anti-pattern) | tag-routed | /qc-dream promote (hit_count ≥ 3) |
+| **Identity** | Who anh is, stack, preferences | one identity note | Auto-update via Mode B distill from chats |
+
+### 3 compute tiers (every memctl call self-routes)
+
+| Tier | Budget | What runs |
+|------|--------|-----------|
+| **HOT** | <500ms | regex/math, pressure check, BM25+semantic, smart retrieval (5 signals) |
+| **WARM** | <5s async | embedding compute, ingest, structural lint |
+| **COLD** | opportunistic | bot-in-session distill via inbox (Mode B), full dream cycle |
+
+### Encode (writes — mostly automatic)
+
+```bash
+# Auto: Stop hook captures conversation → chats/{date}.md (you do nothing)
+# Auto: UserPromptSubmit hook injects ## Memory Context (you read it)
+
+# Manual, by SDLC role:
+memctl add "<text>" --tags "session,task-{id}"           # session state
+memctl add "<text>" --tags "qc-feedback,task-{id}"        # retry feedback
+memctl add "<text>" --tags "qc-error,project-{name}"      # mid-term error pattern
+memctl add "<text>" --tags "golden-rule"                  # cross-project universal
+memctl add "<text>" --tags "insight"                      # meta-learning
+memctl add "<text>" --tags "dream-log"                    # consolidation entry
+
+# Boost importance:
+memctl boost <id> --weight 1.5
+```
+
+### Recall (reads — Tier 3 active recall when injected context insufficient)
+
+```bash
+memctl search-tags "session,task-{id}"        # tag-precise
+memctl search "<query>"                       # hybrid BM25+semantic with smart retrieval
+memctl get <id-or-path>                       # full note content
+memctl list --limit 10                        # top by weight
+```
+
+**Smart retrieval (5 default signals on every search):**
+1. Cluster routing (vault ≥500 notes only) → 2. BM25+semantic hybrid → 3. PRF rerank (drift-guarded) → 4. PageRank boost (recency-clamped) → 5. Wikilink anchor expansion (sparse-graph guarded)
+
+Realistic gain: ~5-10% (vault <100), ~25-35% (vault 500-2000). NOT 50-60%. See protocol §6.
+
+### Maintenance (single command, self-decides scope)
+
+```bash
+memctl maintain               # checks pressure.json, runs only what's needed
+# → may run: ingest re-index, lint, decay, dedupe, dream cycle
+# → throttle 60s — no thrash
+# → emits {"actions": [...], "skipped_reason": "..."} so caller knows
+```
+
+Auto-fires on every memctl invocation (passive). Manual force: `memctl maintain --force`.
+
+### Tag schema (routing key)
+
+| Tag | Purpose | Subdir/Lifecycle |
+|-----|---------|------------------|
+| `session,task-{id}` | SDLC pipeline state | short-term, deleted after task Done |
+| `qc-feedback,task-{id}` | QC retry feedback | short-term |
+| `qc-error,project-{name}` | Mid-term error patterns | promote to qc-rule at hit_count ≥ 3 |
+| `qc-rule,project-{name}` | Active project rules | promote to golden-rule at strength > 5 |
+| `qc-score,project-{name}` | Score history | compress oldest after 20 sessions |
+| `golden-rule` | Universal cross-project | long-term, retire at strength < 0.05 |
+| `anti-pattern` | Recurring agent mistakes | long-term |
+| `insight` | Meta-learning | long-term |
+| `dream-log` | Consolidation history | append-only |
+| `user-preference` | Stack/style/identity | long-term |
+| `project-context,project-{name}` | Project domain | mid-term |
 
 ---
 
