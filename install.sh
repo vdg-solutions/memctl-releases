@@ -1,57 +1,97 @@
 #!/usr/bin/env bash
-# memctl installer — Linux / macOS
-# Usage: curl -fsSL https://raw.githubusercontent.com/vdg-solutions/memctl-releases/master/install.sh | sh
 set -euo pipefail
 
 REPO="vdg-solutions/memctl-releases"
-PREFIX="${MEMCTL_PREFIX:-$HOME/.local/bin}"
+DEFAULT_DIR="$HOME/.local/bin"
 
-uname_s=$(uname -s | tr '[:upper:]' '[:lower:]')
-uname_m=$(uname -m)
+detect_rid() {
+    local os arch
+    os=$(uname -s)
+    arch=$(uname -m)
+    case "$os" in
+        Linux)
+            case "$arch" in
+                x86_64)  echo "linux-x64" ;;
+                aarch64) echo "linux-arm64" ;;
+                *) echo "ERROR: unsupported arch: $arch" >&2; exit 1 ;;
+            esac ;;
+        Darwin)
+            case "$arch" in
+                arm64)  echo "osx-arm64" ;;
+                x86_64) echo "osx-x64" ;;
+                *) echo "ERROR: unsupported arch: $arch" >&2; exit 1 ;;
+            esac ;;
+        *) echo "ERROR: unsupported OS: $os" >&2; exit 1 ;;
+    esac
+}
 
-case "${uname_s}-${uname_m}" in
-  linux-x86_64)   RID=linux-x64   ;;
-  darwin-arm64)   RID=osx-arm64   ;;
-  darwin-aarch64) RID=osx-arm64   ;;
-  darwin-x86_64)  RID=osx-x64     ;;
-  *) echo "Unsupported platform: ${uname_s}-${uname_m}" >&2; exit 1 ;;
-esac
+fetch_latest_tag() {
+    local tag
+    tag=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+        | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+    if [ -z "$tag" ]; then
+        echo "ERROR: could not fetch latest release tag (network error or API rate limit)" >&2
+        exit 1
+    fi
+    echo "$tag"
+}
 
-echo "[memctl] Resolving latest release..."
-LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
-if [[ -z "$LATEST" ]]; then
-  echo "Failed to resolve latest release. Check https://github.com/${REPO}/releases" >&2
-  exit 1
-fi
+main() {
+    local install_dir="$DEFAULT_DIR"
 
-VER="${LATEST#v}"
-ASSET="memctl-${RID}-${VER}.tar.gz"
-URL="https://github.com/${REPO}/releases/download/${LATEST}/${ASSET}"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dir) install_dir="$2"; shift 2 ;;
+            *) echo "ERROR: unknown option: $1" >&2; exit 1 ;;
+        esac
+    done
 
-TMP=$(mktemp -d)
-trap "rm -rf $TMP" EXIT
+    local rid tag ver asset_url tmpdir tmpfile
+    rid=$(detect_rid)
+    tag=$(fetch_latest_tag)
+    ver="${tag#v}"
 
-echo "[memctl] Downloading ${ASSET}..."
-curl -fL --progress-bar -o "${TMP}/${ASSET}" "${URL}"
+    asset_url="https://github.com/$REPO/releases/download/$tag/memctl-$rid-$ver.tar.gz"
+    tmpdir=$(mktemp -d)
+    tmpfile="$tmpdir/memctl.tar.gz"
 
-mkdir -p "${PREFIX}"
-echo "[memctl] Extracting to ${PREFIX}..."
-tar -xzf "${TMP}/${ASSET}" -C "${TMP}"
-mv "${TMP}/memctl" "${PREFIX}/memctl"
-chmod +x "${PREFIX}/memctl"
+    echo "Installing memctl $tag for $rid → $install_dir"
 
-if [[ -f "${TMP}/SKILL.md" ]]; then
-  mkdir -p "${HOME}/.claude/skills/memctl"
-  cp "${TMP}/SKILL.md" "${HOME}/.claude/skills/memctl/SKILL.md"
-  echo "[memctl] Installed Claude Code skill at ~/.claude/skills/memctl/SKILL.md"
-fi
+    curl -fsSL "$asset_url" -o "$tmpfile" || {
+        echo "ERROR: download failed: $asset_url" >&2
+        rm -rf "$tmpdir"
+        exit 1
+    }
+    [ -s "$tmpfile" ] || { echo "ERROR: download empty" >&2; rm -rf "$tmpdir"; exit 1; }
+    tar -tzf "$tmpfile" >/dev/null 2>&1 || { echo "ERROR: archive corrupt" >&2; rm -rf "$tmpdir"; exit 1; }
 
-echo ""
-echo "[memctl] Installed: ${PREFIX}/memctl (${LATEST})"
-case ":$PATH:" in
-  *":${PREFIX}:"*) ;;
-  *) echo "[memctl] WARN: ${PREFIX} not on PATH. Add to your shell rc:"
-     echo "  export PATH=\"${PREFIX}:\$PATH\"" ;;
-esac
+    tar -xzf "$tmpfile" -C "$tmpdir"
 
-"${PREFIX}/memctl" --version || true
+    mkdir -p "$install_dir"
+    cp "$tmpdir/memctl" "$install_dir/memctl"
+    find "$tmpdir" \( -name "*.so" -o -name "*.dylib" \) -exec cp {} "$install_dir/" \;
+
+    chmod +x "$install_dir/memctl"
+
+    if [ "$(uname -s)" = "Darwin" ]; then
+        xattr -d com.apple.quarantine "$install_dir/memctl" 2>/dev/null || true
+        codesign --sign - "$install_dir/memctl" 2>/dev/null || true
+    fi
+
+    "$install_dir/memctl" --version >/dev/null 2>&1 || {
+        echo "ERROR: binary verify failed — memctl --version returned non-zero" >&2
+        rm -rf "$tmpdir"
+        exit 1
+    }
+
+    rm -rf "$tmpdir"
+
+    echo "memctl $tag installed to $install_dir"
+
+    case ":$PATH:" in
+        *":$install_dir:"*) ;;
+        *) echo "NOTE: add $install_dir to PATH: export PATH=\"$install_dir:\$PATH\"" >&2 ;;
+    esac
+}
+
+main "$@"

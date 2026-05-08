@@ -51,18 +51,20 @@ memctl search "<task>"      # find relevant prior decisions
 | `memctl model list` | List downloaded models |
 | `memctl model use <name>` | Switch model (re-ingest required) |
 | `memctl hook-status` | Recent capture + context-inject activity |
+| `memctl config set distill-threshold <n>` | Set conversation count before distill recommendation (default: 5) |
 
 ### Encode
 
 | Command | Description |
 |---------|-------------|
-| `memctl add "<text>"` | Add note. `--llm-*` → auto-tags + wikilinks |
+| `memctl add "<text>"` | Add note. `--content <text>` accepted as alias for positional arg. `--llm-*` → auto-tags + wikilinks |
 | `memctl append <id> "<content>"` | Append to note, re-index |
 | `memctl capture --role <r> --text <t>` | Direct-mode conversation capture |
 | `memctl distill` | L1 → L2: LLM extracts long-term memory from conversations |
 | `memctl distill --conversation <id>` | Distill one specific conversation |
 | `memctl distill --dry-run` | Preview extractions without writing |
 | `memctl distill --since <YYYY-MM-DD>` | Only conversations after date |
+| `memctl distill --resolve-contradictions` | Check + resolve conflicts with existing L2 notes (opt-in) |
 | `memctl organize` | LLM auto-tags + auto-links all notes. `--since <date>` for recent only |
 | `memctl weight <id> <value>` | Set importance (0=archive, 1.0=normal, 1.5=decay-resistant) |
 | `memctl decay --days <n>` | Reduce stale note weights |
@@ -119,7 +121,7 @@ memctl search "<task>"      # find relevant prior decisions
     ├── chats/             ← Stop hook conversation transcripts
     ├── events/            ← EventLog (archived: true, invisible by default)
     ├── attachments/       ← images, binaries
-    └── claude-memory/     ← MEMORY.md index
+    └── ai-memory/         ← MEMORY.md index
 ```
 
 Auto-detect: walks up from cwd for `.memctl/.obsidian/`. Per-project wins over `MEMCTL_SHARED_VAULT`.
@@ -155,6 +157,8 @@ Shared vault: `export MEMCTL_SHARED_VAULT=$HOME/memctl-personal/.memctl`
 
 Client rules: ignore non-zero exit; Stop timeout 10s; UserPromptSubmit timeout 5s; never block on failure.
 
+**Auto-distill recommendation:** `capture` (Stop hook) increments an internal counter per new conversation. When counter ≥ threshold (default 5), `context-inject` appends a `## Distill Recommendation` block to the injected context. On seeing it, run `memctl distill` — which resets the counter. `--dry-run` does NOT reset. Configure threshold: `memctl config set distill-threshold <n>`.
+
 ---
 
 ## JSON envelope
@@ -183,6 +187,8 @@ Error: `"success": false, "data": null, "error": {"code": "...", "message": "...
 
 ## MCP mode
 
+MCP is the primary integration path for any AI tool (Cursor, Cline, VS Code MCP extension, Windsurf, etc.) — no plugin required, zero maintenance.
+
 ```bash
 memctl mcp              # auto-detects vault from cwd
 memctl mcp --vault <p>  # explicit override
@@ -191,6 +197,8 @@ memctl mcp --vault <p>  # explicit override
 MCP tools: search, search_semantic, search_tags, search_date, search_links, get, list, create, update, append, delete, set_weight, get_identity.
 
 Claude Code config (`~/.claude/claude_desktop_config.json`): `{"mcpServers": {"memctl": {"command": "memctl", "args": ["mcp"]}}}`.
+
+Other tools: same JSON structure — add to Cursor `~/.cursor/mcp.json`, Cline settings, or any MCP host config.
 
 ---
 
